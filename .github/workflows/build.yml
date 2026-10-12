@@ -129,7 +129,7 @@ jobs:
         cache: false
 
     - name: Restore Go cache
-      uses: actions/cache/restore@v4
+      uses: actions/cache/restore@v6
       with:
         path: |
           ~/go/pkg/mod
@@ -144,7 +144,7 @@ jobs:
         java-version: ${{ steps.toolchain.outputs.java }}
 
     - name: Set up Gradle
-      uses: gradle/actions/setup-gradle@v4
+      uses: gradle/actions/setup-gradle@v6
 
     - name: Build hev-socks5-tunnel
       run: |
@@ -181,7 +181,7 @@ jobs:
         cp -v libv2ray.aar ../V2rayNG/app/libs/
 
     - name: Save Go cache
-      uses: actions/cache/save@v4
+      uses: actions/cache/save@v6
       with:
         path: |
           ~/go/pkg/mod
@@ -241,7 +241,7 @@ jobs:
         cat "$notes" >> "$GITHUB_STEP_SUMMARY"
 
     - name: Publish release
-      uses: softprops/action-gh-release@v2
+      uses: softprops/action-gh-release@v3
       with:
         tag_name: ${{ env.VERSION }}
         name: v2rayNG ${{ env.VERSION }}

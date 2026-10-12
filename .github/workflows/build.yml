@@ -152,6 +152,14 @@ jobs:
         MAKEFLAGS="-j$(nproc)" bash compile-hevtun.sh
         cp -r libs/. V2rayNG/app/libs/
 
+    - name: Stamp commits into core version
+      working-directory: AndroidLibXrayLite
+      run: |
+        format='"Lib v%d, Xray-core v%s"'
+        stamped="\"Lib v%d-${LIBXRAY_SHA::7}, Xray-core v%s-${XRAY_SHA::7}\""
+        sed -i "s/$format/$stamped/" libv2ray_main.go
+        grep -qF "$stamped" libv2ray_main.go
+
     - name: Build libv2ray
       working-directory: AndroidLibXrayLite
       run: |
@@ -183,7 +191,8 @@ jobs:
     - name: Set version name
       working-directory: V2rayNG
       run: |
-        sed -i -E 's/^(\s*versionName = ")([^"]+)"/\1\2-b${{ github.run_number }}"/' app/build.gradle.kts
+        suffix="${{ github.run_number }}-${V2RAYNG_SHA::7}"
+        sed -i -E "s/^(\s*versionName = \")([^\"]+)\"/\1\2-$suffix\"/" app/build.gradle.kts
         version=$(grep -oP '^\s*versionName = "\K[^"]+' app/build.gradle.kts)
         test -n "$version"
         echo "VERSION=$version" >> "$GITHUB_ENV"

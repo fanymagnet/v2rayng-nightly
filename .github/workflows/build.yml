@@ -14,6 +14,14 @@ jobs:
         repository: 2dust/v2rayNG
         submodules: recursive
 
+    - name: Update hev-socks5-tunnel to latest
+      run: |
+        git -C hev-socks5-tunnel fetch --depth=1 origin HEAD
+        git -C hev-socks5-tunnel checkout --detach FETCH_HEAD
+        git -C hev-socks5-tunnel submodule update --init --recursive --depth=1
+        echo "v2rayNG: $(git rev-parse --short HEAD)" >> $GITHUB_STEP_SUMMARY
+        echo "hev-socks5-tunnel: $(git -C hev-socks5-tunnel describe --tags --always)" >> $GITHUB_STEP_SUMMARY
+
     - uses: android-actions/setup-android@v4
       with:
         log-accepted-android-sdk-licenses: false

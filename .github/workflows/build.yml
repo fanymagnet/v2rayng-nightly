@@ -3,6 +3,9 @@ name: Build latest v2rayNG
 on:
   workflow_dispatch:
 
+permissions:
+  contents: write
+
 jobs:
   build:
     runs-on: ubuntu-latest
@@ -17,8 +20,10 @@ jobs:
         git -C hev-socks5-tunnel fetch --depth=1 origin HEAD
         git -C hev-socks5-tunnel checkout --detach FETCH_HEAD
         git -C hev-socks5-tunnel submodule update --init --recursive --depth=1
-        echo "v2rayNG: $(git rev-parse --short HEAD)" >> $GITHUB_STEP_SUMMARY
-        echo "hev-socks5-tunnel: $(git -C hev-socks5-tunnel describe --tags --always)" >> $GITHUB_STEP_SUMMARY
+        {
+          echo "- v2rayNG: \`$(git rev-parse --short HEAD)\`"
+          echo "- hev-socks5-tunnel: \`$(git -C hev-socks5-tunnel describe --tags --always)\`"
+        } | tee -a "$RUNNER_TEMP/notes.md" >> $GITHUB_STEP_SUMMARY
 
     - uses: android-actions/setup-android@v4
       with:
@@ -62,7 +67,10 @@ jobs:
         gomobile init
         gomobile bind -v -androidapi 24 -trimpath -ldflags='-s -w -buildid= -checklinkname=0' ./
         cp -v libv2ray.aar ../V2rayNG/app/libs/
-        grep xtls/xray-core go.mod >> $GITHUB_STEP_SUMMARY
+        {
+          echo "- xray-core: \`$(go list -m -f '{{.Version}}' github.com/xtls/xray-core)\`"
+          echo "- go: \`$(go env GOVERSION)\`"
+        } | tee -a "$RUNNER_TEMP/notes.md" >> $GITHUB_STEP_SUMMARY
 
     - name: Build APK
       working-directory: V2rayNG
@@ -79,6 +87,15 @@ jobs:
           -Pandroid.injected.signing.store.password="$KS_PASS" \
           -Pandroid.injected.signing.key.alias="$KS_ALIAS" \
           -Pandroid.injected.signing.key.password="$KEY_PASS"
+
+    - name: Publish release
+      uses: softprops/action-gh-release@v2
+      with:
+        tag_name: build-${{ github.run_number }}
+        name: v2rayNG build ${{ github.run_number }}
+        body_path: ${{ runner.temp }}/notes.md
+        make_latest: true
+        files: V2rayNG/app/build/outputs/apk/*/release/*.apk
 
     - uses: actions/upload-artifact@v7
       with:

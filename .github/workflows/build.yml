@@ -1,8 +1,6 @@
 name: Build latest v2rayNG
 
 on:
-  schedule:
-    - cron: '0 3 * * *'
   workflow_dispatch:
 
 jobs:

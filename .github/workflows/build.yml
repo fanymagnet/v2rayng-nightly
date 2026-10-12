@@ -1,0 +1,80 @@
+name: v2rayNG with latest xray-core
+
+on:
+  schedule:
+    - cron: '0 3 * * *'
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v7
+      with:
+        repository: 2dust/v2rayNG
+        submodules: recursive
+
+    - uses: android-actions/setup-android@v4
+      with:
+        log-accepted-android-sdk-licenses: false
+        cmdline-tools-version: '14742923'
+        packages: 'platforms;android-37.0 build-tools;37.0.0 platform-tools'
+
+    - name: Install NDK
+      run: |
+        echo "y" | $ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager --channel=0 --install "ndk;30.0.16248370"
+        echo "NDK_HOME=$ANDROID_HOME/ndk/30.0.16248370" >> $GITHUB_ENV
+        echo "ANDROID_NDK_HOME=$ANDROID_HOME/ndk/30.0.16248370" >> $GITHUB_ENV
+        sed -i '10i\
+        \
+            ndkVersion = "30.0.16248370"' V2rayNG/app/build.gradle.kts
+
+    - uses: actions/setup-go@v6
+      with:
+        go-version: 'stable'
+
+    - uses: actions/setup-java@v6.0.1
+      with:
+        distribution: 'temurin'
+        java-version: '21'
+
+    - name: Build libhevtun
+      run: |
+        bash compile-hevtun.sh
+        cp -r libs/. V2rayNG/app/libs/
+
+    - name: Build libv2ray with xray-core@main
+      working-directory: AndroidLibXrayLite
+      run: |
+        go get github.com/xtls/xray-core@main
+        go get golang.org/x/mobile@latest
+        go mod tidy
+        go install golang.org/x/mobile/cmd/gomobile@latest
+        mkdir -p assets data
+        bash gen_assets.sh download
+        cp -v data/*.dat assets/
+        gomobile init
+        gomobile bind -v -androidapi 24 -trimpath -ldflags='-s -w -buildid= -checklinkname=0' ./
+        cp -v libv2ray.aar ../V2rayNG/app/libs/
+        grep xtls/xray-core go.mod >> $GITHUB_STEP_SUMMARY
+
+    - name: Build APK
+      working-directory: V2rayNG
+      env:
+        KS_B64: ${{ secrets.APP_KEYSTORE_BASE64 }}
+        KS_PASS: ${{ secrets.APP_KEYSTORE_PASSWORD }}
+        KS_ALIAS: ${{ secrets.APP_KEYSTORE_ALIAS }}
+        KEY_PASS: ${{ secrets.APP_KEY_PASSWORD }}
+      run: |
+        echo "$KS_B64" | base64 -d > "$RUNNER_TEMP/ks.jks"
+        echo "sdk.dir=$ANDROID_HOME" > local.properties
+        ./gradlew assembleRelease \
+          -Pandroid.injected.signing.store.file="$RUNNER_TEMP/ks.jks" \
+          -Pandroid.injected.signing.store.password="$KS_PASS" \
+          -Pandroid.injected.signing.key.alias="$KS_ALIAS" \
+          -Pandroid.injected.signing.key.password="$KEY_PASS"
+
+    - uses: actions/upload-artifact@v7
+      with:
+        name: v2rayNG-apk
+        path: V2rayNG/app/build/outputs/apk/*/release/*.apk

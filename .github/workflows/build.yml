@@ -1,4 +1,4 @@
-name: v2rayNG with latest xray-core
+name: Build latest v2rayNG, xray-core, hevtun
 
 on:
   schedule:

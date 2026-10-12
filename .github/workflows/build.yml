@@ -6,6 +6,9 @@ on:
 permissions:
   contents: write
 
+env:
+  ABIS: armeabi-v7a arm64-v8a
+
 jobs:
   build:
     runs-on: ubuntu-latest
@@ -64,14 +67,18 @@ jobs:
     - uses: actions/setup-go@v6
       with:
         go-version: 'stable'
+        cache-dependency-path: AndroidLibXrayLite/go.sum
 
     - uses: actions/setup-java@v6.0.1
       with:
         distribution: 'temurin'
         java-version: ${{ steps.tc.outputs.java }}
 
+    - uses: gradle/actions/setup-gradle@v4
+
     - name: Build libhevtun
       run: |
+        sed -i "s/^ABIS=.*/ABIS=\"$ABIS\"/" compile-hevtun.sh
         bash compile-hevtun.sh
         cp -r libs/. V2rayNG/app/libs/
 
@@ -85,8 +92,16 @@ jobs:
         mkdir -p assets data
         bash gen_assets.sh download
         cp -v data/*.dat assets/
+        targets=$(for a in $ABIS; do
+          case $a in
+            armeabi-v7a) echo android/arm ;;
+            arm64-v8a) echo android/arm64 ;;
+            x86) echo android/386 ;;
+            x86_64) echo android/amd64 ;;
+          esac
+        done | paste -sd,)
         gomobile init
-        gomobile bind -v -androidapi 24 -trimpath -ldflags='-s -w -buildid= -checklinkname=0' ./
+        gomobile bind -v -target="$targets" -androidapi 24 -trimpath -ldflags='-s -w -buildid= -checklinkname=0' ./
         cp -v libv2ray.aar ../V2rayNG/app/libs/
         {
           echo "- xray-core: \`$(go list -m -f '{{.Version}}' github.com/xtls/xray-core)\`"
@@ -112,7 +127,8 @@ jobs:
       run: |
         echo "$KS_B64" | base64 -d > "$RUNNER_TEMP/ks.jks"
         echo "sdk.dir=$ANDROID_HOME" > local.properties
-        ./gradlew assembleRelease \
+        ./gradlew assemblePlaystoreRelease \
+          -PABI_FILTERS="${ABIS// /;}" \
           -Pandroid.injected.signing.store.file="$RUNNER_TEMP/ks.jks" \
           -Pandroid.injected.signing.store.password="$KS_PASS" \
           -Pandroid.injected.signing.key.alias="$KS_ALIAS" \

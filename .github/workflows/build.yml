@@ -146,11 +146,32 @@ jobs:
     - name: Set up Gradle
       uses: gradle/actions/setup-gradle@v6
 
+    - name: Compute hev-socks5-tunnel cache key
+      id: hevtun
+      run: |
+        script_hash=$(sha256sum compile-hevtun.sh | cut -c1-16)
+        echo "cache_key=hevtun-$HEVTUN_SHA-ndk${NDK_HOME##*/}-${ABIS// /-}-$script_hash" >> "$GITHUB_OUTPUT"
+
+    - name: Restore hev-socks5-tunnel cache
+      id: hevtun_cache
+      uses: actions/cache/restore@v6
+      with:
+        path: V2rayNG/app/libs
+        key: ${{ steps.hevtun.outputs.cache_key }}
+
     - name: Build hev-socks5-tunnel
+      if: steps.hevtun_cache.outputs.cache-hit != 'true'
       run: |
         sed -i "s/^ABIS=.*/ABIS=\"$ABIS\"/" compile-hevtun.sh
         MAKEFLAGS="-j$(nproc)" bash compile-hevtun.sh
         cp -r libs/. V2rayNG/app/libs/
+
+    - name: Save hev-socks5-tunnel cache
+      if: steps.hevtun_cache.outputs.cache-hit != 'true'
+      uses: actions/cache/save@v6
+      with:
+        path: V2rayNG/app/libs
+        key: ${{ steps.hevtun.outputs.cache_key }}
 
     - name: Stamp commits into core version
       working-directory: AndroidLibXrayLite

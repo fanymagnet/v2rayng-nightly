@@ -2,6 +2,11 @@ name: Build latest v2rayNG
 
 on:
   workflow_dispatch:
+    inputs:
+      force:
+        description: Build even if nothing changed since the latest release
+        type: boolean
+        default: false
 
 permissions:
   contents: write
@@ -10,135 +15,227 @@ env:
   ABIS: armeabi-v7a arm64-v8a
 
 jobs:
-  build:
+  resolve:
+    name: Resolve latest sources
     runs-on: ubuntu-latest
+    outputs:
+      v2rayng_sha: ${{ steps.resolve.outputs.v2rayng_sha }}
+      libxray_sha: ${{ steps.resolve.outputs.libxray_sha }}
+      hevtun_sha: ${{ steps.resolve.outputs.hevtun_sha }}
+      xray_sha: ${{ steps.resolve.outputs.xray_sha }}
+      fingerprint: ${{ steps.resolve.outputs.fingerprint }}
+      up_to_date: ${{ steps.compare.outputs.up_to_date }}
     steps:
-    - uses: actions/checkout@v7
+    - name: Resolve latest commits
+      id: resolve
+      run: |
+        latest_commit() { git ls-remote "https://github.com/$1" HEAD | cut -f1; }
+
+        v2rayng_sha=$(latest_commit 2dust/v2rayNG)
+        libxray_sha=$(latest_commit 2dust/AndroidLibXrayLite)
+        hevtun_sha=$(latest_commit heiher/hev-socks5-tunnel)
+        xray_sha=$(latest_commit XTLS/Xray-core)
+
+        for name in v2rayng_sha libxray_sha hevtun_sha xray_sha; do
+          test -n "${!name}"
+          echo "$name=${!name}" >> "$GITHUB_OUTPUT"
+        done
+        echo "fingerprint=v2rayNG@$v2rayng_sha AndroidLibXrayLite@$libxray_sha" \
+          "hev-socks5-tunnel@$hevtun_sha Xray-core@$xray_sha" >> "$GITHUB_OUTPUT"
+
+    - name: Compare with latest release
+      id: compare
+      env:
+        GH_TOKEN: ${{ github.token }}
+        FORCE: ${{ inputs.force }}
+        FINGERPRINT: ${{ steps.resolve.outputs.fingerprint }}
+      run: |
+        released=$(gh release view --repo "$GITHUB_REPOSITORY" --json body --jq .body 2>/dev/null \
+          | grep -oP '<!-- fingerprint: \K.*(?= -->)' || true)
+
+        if [ "$FORCE" != true ] && [ "$released" = "$FINGERPRINT" ]; then
+          echo "up_to_date=true" >> "$GITHUB_OUTPUT"
+          echo "Nothing changed since the latest release, build skipped." >> "$GITHUB_STEP_SUMMARY"
+        else
+          echo "up_to_date=false" >> "$GITHUB_OUTPUT"
+        fi
+
+  build:
+    name: Build APK
+    needs: resolve
+    if: needs.resolve.outputs.up_to_date != 'true'
+    runs-on: ubuntu-latest
+    env:
+      V2RAYNG_SHA: ${{ needs.resolve.outputs.v2rayng_sha }}
+      LIBXRAY_SHA: ${{ needs.resolve.outputs.libxray_sha }}
+      HEVTUN_SHA: ${{ needs.resolve.outputs.hevtun_sha }}
+      XRAY_SHA: ${{ needs.resolve.outputs.xray_sha }}
+      FINGERPRINT: ${{ needs.resolve.outputs.fingerprint }}
+    steps:
+    - name: Check out v2rayNG
+      uses: actions/checkout@v7
       with:
         repository: 2dust/v2rayNG
+        ref: ${{ needs.resolve.outputs.v2rayng_sha }}
         submodules: recursive
 
-    - name: Update submodules to latest
+    - name: Check out latest submodules
       run: |
-        for m in AndroidLibXrayLite hev-socks5-tunnel; do
-          git -C $m fetch --depth=1 origin HEAD
-          git -C $m checkout --detach FETCH_HEAD
-          git -C $m submodule update --init --recursive --depth=1
+        checkout_commit() {
+          git -C "$1" fetch --depth=1 origin "$2"
+          git -C "$1" checkout --detach FETCH_HEAD
+          git -C "$1" submodule update --init --recursive --depth=1
+        }
+
+        checkout_commit AndroidLibXrayLite "$LIBXRAY_SHA"
+        checkout_commit hev-socks5-tunnel "$HEVTUN_SHA"
+
+    - name: Read toolchain versions
+      id: toolchain
+      run: |
+        upstream=.github/workflows/build.yml
+        cmdline_tools=$(grep -oP "cmdline-tools-version: '\K[0-9]+" $upstream)
+        sdk_packages=$(grep -oP "packages: '\K[^']+" $upstream)
+        ndk=$(grep -oP 'ndk;\K[0-9.]+' $upstream | head -1)
+        java=$(grep -oP "java-version: '\K[0-9]+" $upstream)
+
+        for name in cmdline_tools sdk_packages ndk java; do
+          test -n "${!name}"
+          echo "$name=${!name}" | tee -a "$GITHUB_OUTPUT"
         done
-        {
-          echo "- v2rayNG: \`$(git rev-parse --short HEAD)\`"
-          echo "- AndroidLibXrayLite: \`$(git -C AndroidLibXrayLite rev-parse --short HEAD)\`"
-          echo "- hev-socks5-tunnel: \`$(git -C hev-socks5-tunnel rev-parse --short HEAD)\`"
-        } | tee -a "$RUNNER_TEMP/notes.md" >> $GITHUB_STEP_SUMMARY
 
-    - name: Read toolchain versions from upstream
-      id: tc
-      run: |
-        W=.github/workflows/build.yml
-        cmdline=$(grep -oP "cmdline-tools-version: '\K[0-9]+" $W)
-        packages=$(grep -oP "packages: '\K[^']+" $W)
-        ndk=$(grep -oP 'ndk;\K[0-9.]+' $W | head -1)
-        java=$(grep -oP "java-version: '\K[0-9]+" $W)
-        test -n "$cmdline" && test -n "$packages" && test -n "$ndk" && test -n "$java"
-        {
-          echo "cmdline=$cmdline"
-          echo "packages=$packages"
-          echo "ndk=$ndk"
-          echo "java=$java"
-        } | tee -a $GITHUB_OUTPUT
-
-    - uses: android-actions/setup-android@v4
+    - name: Set up Android SDK
+      uses: android-actions/setup-android@v4
       with:
         log-accepted-android-sdk-licenses: false
-        cmdline-tools-version: ${{ steps.tc.outputs.cmdline }}
-        packages: ${{ steps.tc.outputs.packages }}
+        cmdline-tools-version: ${{ steps.toolchain.outputs.cmdline_tools }}
+        packages: ${{ steps.toolchain.outputs.sdk_packages }}
 
-    - name: Install NDK
+    - name: Install Android NDK
       env:
-        NDK: ${{ steps.tc.outputs.ndk }}
+        NDK_VERSION: ${{ steps.toolchain.outputs.ndk }}
       run: |
-        echo "y" | $ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager --channel=0 --install "ndk;$NDK"
-        echo "NDK_HOME=$ANDROID_HOME/ndk/$NDK" >> $GITHUB_ENV
-        echo "ANDROID_NDK_HOME=$ANDROID_HOME/ndk/$NDK" >> $GITHUB_ENV
+        echo y | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --channel=0 --install "ndk;$NDK_VERSION"
+        echo "NDK_HOME=$ANDROID_HOME/ndk/$NDK_VERSION" >> "$GITHUB_ENV"
+        echo "ANDROID_NDK_HOME=$ANDROID_HOME/ndk/$NDK_VERSION" >> "$GITHUB_ENV"
         sed -i "10i\\
         \\
-            ndkVersion = \"$NDK\"" V2rayNG/app/build.gradle.kts
+            ndkVersion = \"$NDK_VERSION\"" V2rayNG/app/build.gradle.kts
 
-    - uses: actions/setup-go@v6
+    - name: Set up Go
+      uses: actions/setup-go@v6
       with:
-        go-version: 'stable'
-        cache-dependency-path: AndroidLibXrayLite/go.sum
+        go-version: stable
+        cache: false
 
-    - uses: actions/setup-java@v6.0.1
+    - name: Restore Go cache
+      uses: actions/cache/restore@v4
       with:
-        distribution: 'temurin'
-        java-version: ${{ steps.tc.outputs.java }}
+        path: |
+          ~/go/pkg/mod
+          ~/.cache/go-build
+        key: go-${{ runner.os }}-${{ github.run_id }}
+        restore-keys: go-${{ runner.os }}-
 
-    - uses: gradle/actions/setup-gradle@v4
+    - name: Set up Java
+      uses: actions/setup-java@v6.0.1
+      with:
+        distribution: temurin
+        java-version: ${{ steps.toolchain.outputs.java }}
 
-    - name: Build libhevtun
+    - name: Set up Gradle
+      uses: gradle/actions/setup-gradle@v4
+
+    - name: Build hev-socks5-tunnel
       run: |
         sed -i "s/^ABIS=.*/ABIS=\"$ABIS\"/" compile-hevtun.sh
-        bash compile-hevtun.sh
+        MAKEFLAGS="-j$(nproc)" bash compile-hevtun.sh
         cp -r libs/. V2rayNG/app/libs/
 
-    - name: Build libv2ray with latest xray-core
+    - name: Build libv2ray
       working-directory: AndroidLibXrayLite
       run: |
-        go get github.com/xtls/xray-core@main
+        go get "github.com/xtls/xray-core@$XRAY_SHA"
         go get golang.org/x/mobile@latest
         go mod tidy
         go install golang.org/x/mobile/cmd/gomobile@latest
+
         mkdir -p assets data
         bash gen_assets.sh download
         cp -v data/*.dat assets/
-        targets=$(for a in $ABIS; do
-          case $a in
-            armeabi-v7a) echo android/arm ;;
-            arm64-v8a) echo android/arm64 ;;
-            x86) echo android/386 ;;
-            x86_64) echo android/amd64 ;;
-          esac
-        done | paste -sd,)
-        gomobile init
-        gomobile bind -v -target="$targets" -androidapi 24 -trimpath -ldflags='-s -w -buildid= -checklinkname=0' ./
-        cp -v libv2ray.aar ../V2rayNG/app/libs/
-        {
-          echo "- xray-core: \`$(go list -m -f '{{.Version}}' github.com/xtls/xray-core)\`"
-          echo "- go: \`$(go env GOVERSION)\`"
-        } | tee -a "$RUNNER_TEMP/notes.md" >> $GITHUB_STEP_SUMMARY
 
-    - name: Set build version
+        declare -A go_arch=([armeabi-v7a]=arm [arm64-v8a]=arm64 [x86]=386 [x86_64]=amd64)
+        targets=$(for abi in $ABIS; do echo "android/${go_arch[$abi]}"; done | paste -sd,)
+
+        gomobile init
+        gomobile bind -v -target="$targets" -androidapi 24 -trimpath \
+          -ldflags='-s -w -buildid= -checklinkname=0' ./
+        cp -v libv2ray.aar ../V2rayNG/app/libs/
+
+    - name: Save Go cache
+      uses: actions/cache/save@v4
+      with:
+        path: |
+          ~/go/pkg/mod
+          ~/.cache/go-build
+        key: go-${{ runner.os }}-${{ github.run_id }}
+
+    - name: Set version name
       working-directory: V2rayNG
       run: |
         sed -i -E 's/^(\s*versionName = ")([^"]+)"/\1\2-b${{ github.run_number }}"/' app/build.gradle.kts
         version=$(grep -oP '^\s*versionName = "\K[^"]+' app/build.gradle.kts)
         test -n "$version"
-        echo "VERSION=$version" >> $GITHUB_ENV
-        sed -i "1i - versionName: \`$version\`" "$RUNNER_TEMP/notes.md"
+        echo "VERSION=$version" >> "$GITHUB_ENV"
 
     - name: Build APK
       working-directory: V2rayNG
       env:
-        KS_B64: ${{ secrets.APP_KEYSTORE_BASE64 }}
-        KS_PASS: ${{ secrets.APP_KEYSTORE_PASSWORD }}
-        KS_ALIAS: ${{ secrets.APP_KEYSTORE_ALIAS }}
-        KEY_PASS: ${{ secrets.APP_KEY_PASSWORD }}
+        KEYSTORE_BASE64: ${{ secrets.APP_KEYSTORE_BASE64 }}
+        KEYSTORE_PASSWORD: ${{ secrets.APP_KEYSTORE_PASSWORD }}
+        KEY_ALIAS: ${{ secrets.APP_KEYSTORE_ALIAS }}
+        KEY_PASSWORD: ${{ secrets.APP_KEY_PASSWORD }}
       run: |
-        echo "$KS_B64" | base64 -d > "$RUNNER_TEMP/ks.jks"
+        keystore="$RUNNER_TEMP/keystore.jks"
+        base64 -d <<< "$KEYSTORE_BASE64" > "$keystore"
         echo "sdk.dir=$ANDROID_HOME" > local.properties
+
         ./gradlew assemblePlaystoreRelease \
+          --build-cache \
+          --exclude-task :app:lintVitalPlaystoreRelease \
           -PABI_FILTERS="${ABIS// /;}" \
-          -Pandroid.injected.signing.store.file="$RUNNER_TEMP/ks.jks" \
-          -Pandroid.injected.signing.store.password="$KS_PASS" \
-          -Pandroid.injected.signing.key.alias="$KS_ALIAS" \
-          -Pandroid.injected.signing.key.password="$KEY_PASS"
+          -Pandroid.injected.signing.store.file="$keystore" \
+          -Pandroid.injected.signing.store.password="$KEYSTORE_PASSWORD" \
+          -Pandroid.injected.signing.key.alias="$KEY_ALIAS" \
+          -Pandroid.injected.signing.key.password="$KEY_PASSWORD"
+
+    - name: Write release notes
+      env:
+        NDK_VERSION: ${{ steps.toolchain.outputs.ndk }}
+      run: |
+        notes="$RUNNER_TEMP/release-notes.md"
+        commit_link() { echo "[\`${2::7}\`](https://github.com/$1/commit/$2)"; }
+        xray_version=$(cd AndroidLibXrayLite && go list -m -f '{{.Version}}' github.com/xtls/xray-core)
+
+        cat > "$notes" <<EOF
+        | Component | Version |
+        |---|---|
+        | v2rayNG | $(commit_link 2dust/v2rayNG "$V2RAYNG_SHA") |
+        | AndroidLibXrayLite | $(commit_link 2dust/AndroidLibXrayLite "$LIBXRAY_SHA") |
+        | hev-socks5-tunnel | $(commit_link heiher/hev-socks5-tunnel "$HEVTUN_SHA") |
+        | Xray-core | $(commit_link XTLS/Xray-core "$XRAY_SHA") \`$xray_version\` |
+        | Go | \`$(go env GOVERSION)\` |
+        | NDK | \`$NDK_VERSION\` |
+
+        <!-- fingerprint: $FINGERPRINT -->
+        EOF
+        cat "$notes" >> "$GITHUB_STEP_SUMMARY"
 
     - name: Publish release
       uses: softprops/action-gh-release@v2
       with:
-        tag_name: build-${{ github.run_number }}
+        tag_name: ${{ env.VERSION }}
         name: v2rayNG ${{ env.VERSION }}
-        body_path: ${{ runner.temp }}/notes.md
+        body_path: ${{ runner.temp }}/release-notes.md
         make_latest: true
-        files: V2rayNG/app/build/outputs/apk/*/release/*.apk
+        files: V2rayNG/app/build/outputs/apk/playstore/release/*.apk

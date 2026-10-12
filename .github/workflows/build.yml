@@ -15,30 +15,51 @@ jobs:
         repository: 2dust/v2rayNG
         submodules: recursive
 
-    - name: Update hev-socks5-tunnel to latest
+    - name: Update submodules to latest
       run: |
-        git -C hev-socks5-tunnel fetch --depth=1 origin HEAD
-        git -C hev-socks5-tunnel checkout --detach FETCH_HEAD
-        git -C hev-socks5-tunnel submodule update --init --recursive --depth=1
+        for m in AndroidLibXrayLite hev-socks5-tunnel; do
+          git -C $m fetch --depth=1 origin HEAD
+          git -C $m checkout --detach FETCH_HEAD
+          git -C $m submodule update --init --recursive --depth=1
+        done
         {
           echo "- v2rayNG: \`$(git rev-parse --short HEAD)\`"
-          echo "- hev-socks5-tunnel: \`$(git -C hev-socks5-tunnel describe --tags --always)\`"
+          echo "- AndroidLibXrayLite: \`$(git -C AndroidLibXrayLite rev-parse --short HEAD)\`"
+          echo "- hev-socks5-tunnel: \`$(git -C hev-socks5-tunnel rev-parse --short HEAD)\`"
         } | tee -a "$RUNNER_TEMP/notes.md" >> $GITHUB_STEP_SUMMARY
+
+    - name: Read toolchain versions from upstream
+      id: tc
+      run: |
+        W=.github/workflows/build.yml
+        cmdline=$(grep -oP "cmdline-tools-version: '\K[0-9]+" $W)
+        packages=$(grep -oP "packages: '\K[^']+" $W)
+        ndk=$(grep -oP 'ndk;\K[0-9.]+' $W | head -1)
+        java=$(grep -oP "java-version: '\K[0-9]+" $W)
+        test -n "$cmdline" && test -n "$packages" && test -n "$ndk" && test -n "$java"
+        {
+          echo "cmdline=$cmdline"
+          echo "packages=$packages"
+          echo "ndk=$ndk"
+          echo "java=$java"
+        } | tee -a $GITHUB_OUTPUT
 
     - uses: android-actions/setup-android@v4
       with:
         log-accepted-android-sdk-licenses: false
-        cmdline-tools-version: '14742923'
-        packages: 'platforms;android-37.0 build-tools;37.0.0 platform-tools'
+        cmdline-tools-version: ${{ steps.tc.outputs.cmdline }}
+        packages: ${{ steps.tc.outputs.packages }}
 
     - name: Install NDK
+      env:
+        NDK: ${{ steps.tc.outputs.ndk }}
       run: |
-        echo "y" | $ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager --channel=0 --install "ndk;30.0.16248370"
-        echo "NDK_HOME=$ANDROID_HOME/ndk/30.0.16248370" >> $GITHUB_ENV
-        echo "ANDROID_NDK_HOME=$ANDROID_HOME/ndk/30.0.16248370" >> $GITHUB_ENV
-        sed -i '10i\
-        \
-            ndkVersion = "30.0.16248370"' V2rayNG/app/build.gradle.kts
+        echo "y" | $ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager --channel=0 --install "ndk;$NDK"
+        echo "NDK_HOME=$ANDROID_HOME/ndk/$NDK" >> $GITHUB_ENV
+        echo "ANDROID_NDK_HOME=$ANDROID_HOME/ndk/$NDK" >> $GITHUB_ENV
+        sed -i "10i\\
+        \\
+            ndkVersion = \"$NDK\"" V2rayNG/app/build.gradle.kts
 
     - uses: actions/setup-go@v6
       with:
@@ -47,14 +68,14 @@ jobs:
     - uses: actions/setup-java@v6.0.1
       with:
         distribution: 'temurin'
-        java-version: '21'
+        java-version: ${{ steps.tc.outputs.java }}
 
     - name: Build libhevtun
       run: |
         bash compile-hevtun.sh
         cp -r libs/. V2rayNG/app/libs/
 
-    - name: Build libv2ray with xray-core@main
+    - name: Build libv2ray with latest xray-core
       working-directory: AndroidLibXrayLite
       run: |
         go get github.com/xtls/xray-core@main
@@ -71,6 +92,15 @@ jobs:
           echo "- xray-core: \`$(go list -m -f '{{.Version}}' github.com/xtls/xray-core)\`"
           echo "- go: \`$(go env GOVERSION)\`"
         } | tee -a "$RUNNER_TEMP/notes.md" >> $GITHUB_STEP_SUMMARY
+
+    - name: Set build version
+      working-directory: V2rayNG
+      run: |
+        sed -i -E 's/^(\s*versionName = ")([^"]+)"/\1\2-b${{ github.run_number }}"/' app/build.gradle.kts
+        version=$(grep -oP '^\s*versionName = "\K[^"]+' app/build.gradle.kts)
+        test -n "$version"
+        echo "VERSION=$version" >> $GITHUB_ENV
+        sed -i "1i - versionName: \`$version\`" "$RUNNER_TEMP/notes.md"
 
     - name: Build APK
       working-directory: V2rayNG
@@ -92,7 +122,7 @@ jobs:
       uses: softprops/action-gh-release@v2
       with:
         tag_name: build-${{ github.run_number }}
-        name: v2rayNG build ${{ github.run_number }}
+        name: v2rayNG ${{ env.VERSION }}
         body_path: ${{ runner.temp }}/notes.md
         make_latest: true
         files: V2rayNG/app/build/outputs/apk/*/release/*.apk

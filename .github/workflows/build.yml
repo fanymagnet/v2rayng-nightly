@@ -212,7 +212,7 @@ jobs:
     - name: Set version name
       working-directory: V2rayNG
       run: |
-        suffix="${{ github.run_number }}-${V2RAYNG_SHA::7}"
+        suffix="${{ github.run_number }}.${V2RAYNG_SHA::7}"
         sed -i -E "s/^(\s*versionName = \")([^\"]+)\"/\1\2-$suffix\"/" app/build.gradle.kts
         version=$(grep -oP '^\s*versionName = "\K[^"]+' app/build.gradle.kts)
         test -n "$version"

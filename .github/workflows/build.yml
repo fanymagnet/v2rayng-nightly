@@ -1,6 +1,8 @@
 name: Build latest v2rayNG
 
 on:
+  schedule:
+  - cron: '17 3 * * *'
   workflow_dispatch:
     inputs:
       force:
@@ -36,12 +38,13 @@ jobs:
         hevtun_sha=$(latest_commit heiher/hev-socks5-tunnel)
         xray_sha=$(latest_commit XTLS/Xray-core)
 
-        for name in v2rayng_sha libxray_sha hevtun_sha xray_sha; do
-          test -n "${!name}"
-          echo "$name=${!name}" >> "$GITHUB_OUTPUT"
-        done
-        echo "fingerprint=v2rayNG@$v2rayng_sha AndroidLibXrayLite@$libxray_sha" \
-          "hev-socks5-tunnel@$hevtun_sha Xray-core@$xray_sha" >> "$GITHUB_OUTPUT"
+        tee -a "$GITHUB_OUTPUT" <<EOF
+        v2rayng_sha=$v2rayng_sha
+        libxray_sha=$libxray_sha
+        hevtun_sha=$hevtun_sha
+        xray_sha=$xray_sha
+        fingerprint=v2rayNG@$v2rayng_sha AndroidLibXrayLite@$libxray_sha hev-socks5-tunnel@$hevtun_sha Xray-core@$xray_sha
+        EOF
 
     - name: Compare with latest release
       id: compare
@@ -76,7 +79,7 @@ jobs:
       uses: actions/checkout@v7
       with:
         repository: 2dust/v2rayNG
-        ref: ${{ needs.resolve.outputs.v2rayng_sha }}
+        ref: ${{ env.V2RAYNG_SHA }}
         submodules: recursive
 
     - name: Check out latest submodules
@@ -94,33 +97,32 @@ jobs:
       id: toolchain
       run: |
         upstream=.github/workflows/build.yml
-        cmdline_tools=$(grep -oP "cmdline-tools-version: '\K[0-9]+" $upstream)
-        sdk_packages=$(grep -oP "packages: '\K[^']+" $upstream)
-        ndk=$(grep -oP 'ndk;\K[0-9.]+' $upstream | head -1)
-        java=$(grep -oP "java-version: '\K[0-9]+" $upstream)
+        cmdline_tools=$(grep -m1 -oP "cmdline-tools-version: '\K[0-9]+" $upstream)
+        sdk_packages=$(grep -m1 -oP "packages: '\K[^']+" $upstream)
+        ndk=$(grep -m1 -oP 'ndk;\K[0-9.]+' $upstream)
+        java=$(grep -m1 -oP "java-version: '\K[0-9]+" $upstream)
 
-        for name in cmdline_tools sdk_packages ndk java; do
-          test -n "${!name}"
-          echo "$name=${!name}" | tee -a "$GITHUB_OUTPUT"
-        done
+        tee -a "$GITHUB_OUTPUT" <<EOF
+        cmdline_tools=$cmdline_tools
+        sdk_packages=$sdk_packages
+        ndk=$ndk
+        java=$java
+        EOF
 
     - name: Set up Android SDK
       uses: android-actions/setup-android@v4
       with:
         log-accepted-android-sdk-licenses: false
         cmdline-tools-version: ${{ steps.toolchain.outputs.cmdline_tools }}
-        packages: ${{ steps.toolchain.outputs.sdk_packages }}
+        packages: ${{ steps.toolchain.outputs.sdk_packages }} ndk;${{ steps.toolchain.outputs.ndk }}
 
-    - name: Install Android NDK
+    - name: Point build at Android NDK
       env:
         NDK_VERSION: ${{ steps.toolchain.outputs.ndk }}
       run: |
-        echo y | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --channel=0 --install "ndk;$NDK_VERSION"
         echo "NDK_HOME=$ANDROID_HOME/ndk/$NDK_VERSION" >> "$GITHUB_ENV"
         echo "ANDROID_NDK_HOME=$ANDROID_HOME/ndk/$NDK_VERSION" >> "$GITHUB_ENV"
-        sed -i "10i\\
-        \\
-            ndkVersion = \"$NDK_VERSION\"" V2rayNG/app/build.gradle.kts
+        sed -i "/^android {/a\    ndkVersion = \"$NDK_VERSION\"" V2rayNG/app/build.gradle.kts
 
     - name: Set up Go
       uses: actions/setup-go@v6
@@ -131,10 +133,10 @@ jobs:
     - name: Restore Go cache
       uses: actions/cache/restore@v6
       with:
-        path: |
+        path: &go-cache-path |
           ~/go/pkg/mod
           ~/.cache/go-build
-        key: go-${{ runner.os }}-${{ github.run_id }}
+        key: &go-cache-key go-${{ runner.os }}-${{ github.run_id }}
         restore-keys: go-${{ runner.os }}-
 
     - name: Set up Java
@@ -146,6 +148,7 @@ jobs:
     - name: Set up Gradle
       uses: gradle/actions/setup-gradle@v6
 
+    # Hashed here: building rewrites ABIS in compile-hevtun.sh.
     - name: Compute hev-socks5-tunnel cache key
       id: hevtun
       run: |
@@ -156,8 +159,8 @@ jobs:
       id: hevtun_cache
       uses: actions/cache/restore@v6
       with:
-        path: V2rayNG/app/libs
-        key: ${{ steps.hevtun.outputs.cache_key }}
+        path: &hevtun-cache-path V2rayNG/app/libs
+        key: &hevtun-cache-key ${{ steps.hevtun.outputs.cache_key }}
 
     - name: Build hev-socks5-tunnel
       if: steps.hevtun_cache.outputs.cache-hit != 'true'
@@ -170,8 +173,8 @@ jobs:
       if: steps.hevtun_cache.outputs.cache-hit != 'true'
       uses: actions/cache/save@v6
       with:
-        path: V2rayNG/app/libs
-        key: ${{ steps.hevtun.outputs.cache_key }}
+        path: *hevtun-cache-path
+        key: *hevtun-cache-key
 
     - name: Stamp commits into core version
       working-directory: AndroidLibXrayLite
@@ -184,8 +187,7 @@ jobs:
     - name: Build libv2ray
       working-directory: AndroidLibXrayLite
       run: |
-        go get "github.com/xtls/xray-core@$XRAY_SHA"
-        go get golang.org/x/mobile@latest
+        go get "github.com/xtls/xray-core@$XRAY_SHA" golang.org/x/mobile@latest
         go mod tidy
         go install golang.org/x/mobile/cmd/gomobile@latest
 
@@ -197,25 +199,22 @@ jobs:
         targets=$(for abi in $ABIS; do echo "android/${go_arch[$abi]}"; done | paste -sd,)
 
         gomobile init
-        gomobile bind -v -target="$targets" -androidapi 24 -trimpath \
+        gomobile bind -target="$targets" -androidapi 24 -trimpath \
           -ldflags='-s -w -buildid= -checklinkname=0' ./
         cp -v libv2ray.aar ../V2rayNG/app/libs/
 
     - name: Save Go cache
       uses: actions/cache/save@v6
       with:
-        path: |
-          ~/go/pkg/mod
-          ~/.cache/go-build
-        key: go-${{ runner.os }}-${{ github.run_id }}
+        path: *go-cache-path
+        key: *go-cache-key
 
     - name: Set version name
       working-directory: V2rayNG
       run: |
-        suffix="${{ github.run_number }}.${V2RAYNG_SHA::7}"
-        sed -i -E "s/^(\s*versionName = \")([^\"]+)\"/\1\2-$suffix\"/" app/build.gradle.kts
-        version=$(grep -oP '^\s*versionName = "\K[^"]+' app/build.gradle.kts)
-        test -n "$version"
+        base=$(grep -m1 -oP '^\s*versionName = "\K[^"]+' app/build.gradle.kts)
+        version="$base-$GITHUB_RUN_NUMBER.${V2RAYNG_SHA::7}"
+        sed -i "s/versionName = \"$base\"/versionName = \"$version\"/" app/build.gradle.kts
         echo "VERSION=$version" >> "$GITHUB_ENV"
 
     - name: Build APK
@@ -228,7 +227,6 @@ jobs:
       run: |
         keystore="$RUNNER_TEMP/keystore.jks"
         base64 -d <<< "$KEYSTORE_BASE64" > "$keystore"
-        echo "sdk.dir=$ANDROID_HOME" > local.properties
 
         ./gradlew assemblePlaystoreRelease \
           --build-cache \
@@ -243,11 +241,13 @@ jobs:
       env:
         NDK_VERSION: ${{ steps.toolchain.outputs.ndk }}
       run: |
-        notes="$RUNNER_TEMP/release-notes.md"
         commit_link() { echo "[\`${2::7}\`](https://github.com/$1/commit/$2)"; }
-        xray_version=$(cd AndroidLibXrayLite && go list -m -f '{{.Version}}' github.com/xtls/xray-core)
+        xray_version=$(go -C AndroidLibXrayLite list -m -f '{{.Version}}' github.com/xtls/xray-core)
 
-        cat > "$notes" <<EOF
+        mkdir -p "$RUNNER_TEMP/release"
+        tee "$RUNNER_TEMP/release/README.md" >> "$GITHUB_STEP_SUMMARY" <<EOF
+        # v2rayNG $VERSION
+
         | Component | Version |
         |---|---|
         | v2rayNG | $(commit_link 2dust/v2rayNG "$V2RAYNG_SHA") |
@@ -259,13 +259,25 @@ jobs:
 
         <!-- fingerprint: $FINGERPRINT -->
         EOF
-        cat "$notes" >> "$GITHUB_STEP_SUMMARY"
 
     - name: Publish release
-      uses: softprops/action-gh-release@v3
-      with:
-        tag_name: ${{ env.VERSION }}
-        name: v2rayNG ${{ env.VERSION }}
-        body_path: ${{ runner.temp }}/release-notes.md
-        make_latest: true
-        files: V2rayNG/app/build/outputs/apk/playstore/release/*.apk
+      env:
+        GH_TOKEN: ${{ github.token }}
+      run: |
+        gh release create "$VERSION" --repo "$GITHUB_REPOSITORY" --title "v2rayNG $VERSION" --latest \
+          --notes-file "$RUNNER_TEMP/release/README.md" \
+          V2rayNG/app/build/outputs/apk/playstore/release/*.apk
+
+    # A push counts as repository activity and keeps the schedule from being disabled after 60 days.
+    - name: Push release branch
+      working-directory: ${{ runner.temp }}/release
+      env:
+        GH_TOKEN: ${{ github.token }}
+      run: |
+        gh auth setup-git
+        git init -q
+        git add README.md
+        git -c user.name='github-actions[bot]' \
+          -c user.email='41898282+github-actions[bot]@users.noreply.github.com' \
+          commit -qm "v2rayNG $VERSION"
+        git push -qf "https://github.com/$GITHUB_REPOSITORY" HEAD:release
